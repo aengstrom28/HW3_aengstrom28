@@ -1,0 +1,142 @@
+HW3_anegstrom28
+
+#Step 1: Loading Databases
+```{r} 
+library(knitr)
+opts_chunk$set(cache=TRUE)
+library(data.table)
+library(ggplot2)
+library(limma)
+library(edgeR)
+library(GEOquery)
+```
+
+#Step 2: Download GSE45735 and supplementary files from the GEO database or retrieve the file from a local directory
+```{r}
+gd <- getGEO(filename="/Users/jjengstrom/Biostat-578/Data/GSE45735_series_matrix.txt.gz")
+pd <- pData(gd)
+getGEOSuppFiles("GSE45735", makeDirectory=FALSE, baseDir = "/Users/jjengstrom/Biostat-578/Data/")
+```
+#Step 3: Open the T14.gz fill and manually remove the last few rows with extraneous text; save modified T14 file as a .txt file. Unzip the other supplementary files (.gz) and save as .txt files in the same directory as the T14.txt file.
+
+#Step 4: Note the regular expression to grep file names and remove duplicated rows
+```{r}
+files <- list.files(path = "/Users/jjengstrom/Biostat-578/Data/", pattern = "GSE45735_T.*.txt", full.names = TRUE)
+file_list <- lapply(files, read.table, header=TRUE)
+file_list_unique <- lapply(file_list, function(x){x<-x[!duplicated(x$Gene),]; x <- x[order(x$Gene),]; rownames(x) <- x$Gene; x[,-1]})
+```
+#Step 5: Take the intersection of all genes and clean-up the pData
+```{r}
+gene_list <- Reduce(intersect, lapply(file_list_unique, rownames))
+file_list_unique <- lapply(file_list_unique, "[", gene_list,)
+matrix <- as.matrix(do.call(cbind, file_list_unique))
+pd_small <- pd[!grepl("T13_Day8",pd$title),]
+pd_small$Day <- sapply(strsplit(gsub(" \\[PBMC\\]", "", pd_small$title),"_"),"[",2)
+pd_small$subject <- sapply(strsplit(gsub(" \\[PBMC\\]", "", pd_small$title),"_"),"[",1)
+colnames(matrix) <- rownames(pd_small)
+```
+#Step 6: Install the SRAdb package in order to be able to query the SRA files from the GEO database
+```{r}
+source("http://bioconductor.org/biocLite.R")
+biocLite("SRAdb")
+```
+# Step 7: Create an eset with the RNASeq metadata and counts
+```{r}
+# Note that I add one to the count
+new_set <- ExpressionSet(assayData = matrix+1)
+pData(new_set) <- pd_small
+```
+# Step 8: Set-up a design matrix and use voom to estimate the weights
+```{r}
+design <- model.matrix(~subject+Day, new_set)
+new_set_voom <- voom(new_set,design = design)
+```
+# Step 9: Use limma to test for differential expression. Get topTables for each timepoint to test whether each day=day0 and determine the number of differentially expressed genes with a FDR cutoff of 0.01
+```{r}
+lm <- lmFit(new_set_voom, design)
+eb <- eBayes(lm)
+# Look at the other time-points to test whether day1=day0
+topTable(eb, coef = "DayDay1", number = Inf)
+sum(topTable$adj.P.Val < 0.01)
+topTable2 <- topTable(eb, coef = "DayDay2", number = Inf)
+sum(topTable2$adj.P.Val < 0.01)
+topTable3 <- topTable(eb, coef = "DayDay3", number = Inf)
+sum(topTable3$adj.P.Val < 0.01)
+topTable4 <- topTable(eb, coef = "DayDay4", number = Inf)
+topTable5 <- topTable(eb, coef = "DayDay5", number = Inf)
+topTable6 <- topTable(eb, coef = "DayDay6", number = Inf)
+topTable7 <- topTable(eb, coef = "DayDay7", number = Inf)
+topTable8 <- topTable(eb, coef = "DayDay8", number = Inf)
+topTable9 <- topTable(eb, coef = "DayDay9", number = Inf)
+topTable10 <- topTable(eb, coef = "DayDay10", number = Inf)
+sum(topTable4$adj.P.Val < 0.01)
+sum(topTable5$adj.P.Val < 0.01)
+sum(topTable6$adj.P.Val < 0.01)
+sum(topTable7$adj.P.Val < 0.01)
+sum(topTable8$adj.P.Val < 0.01)
+sum(topTable9$adj.P.Val < 0.01)
+sum(topTable10$adj.P.Val < 0.01)
+```
+
+#Step 10: Make a heatmap of the differentially expressed genes, ordered by time-point
+```{r}
+library(pheatmap)
+probes <- topTable$adj.P.Val<0.01
+sum(probes)
+final_set <- new_set[probes,]
+dim(final_set)
+final_eset <- pData(final_set)
+final_sort <- final_eset[order(final_eset$Day),]
+hmcolorder <- rownames(final_sort)
+hmcolnames <- final_sort$subject
+hmdata <- exprs(final_set)
+hmdt <- as.data.table(hmdata)
+setcolorder(hmdt, hmcolorder)
+hmdata <- data.matrix(hmdt)
+colnames(hmdata) <- hmcolnames
+heatmap(hmdata)
+```
+# Step 11: Download GSEAbase to load gene sets
+```{r}
+library(BiocInstaller)
+biocLite("GSEABase")
+```
+# Step 12: Get all gene sets from GSEA and convert to gene indices
+```{r}
+library(GSEABase)
+c2_set <- getGmt("GSEA/c2.all.v4.0.symbols.gmt")
+gene_ids <- geneIds(c2_set)
+# Camera requires gene-indices
+sets_indices <- symbols2indices(gene_ids, rownames(new_set))
+```
+# Step 13: Set-up contrast matrix for camera
+```{r}
+# Note that camera works on voom objects
+cont_matrix <- makeContrasts("DayDay1", levels=design)
+res <- camera(new_set_voom, sets_indices, design=design, cont_matrix)
+res[1:10, ]
+```
+# Step 14: Find enriched gene sets over time
+```{r}
+res <- vector("list",length = 10)
+for(i in 1:10)
+  {
+  contrast <- paste0("DayDay",i)
+  cont_matrix <- makeContrasts(contrast, levels=design)
+  res[[i]] <- camera(new_set_voom, sets_indices, design=design, contrast=cont_matrix, sort=FALSE)
+}
+```
+# Step 15: Make heatmap of differentially expressed genes grouped by timepoint
+```{r}
+library(pheatmap)
+PValue <- sapply(res, function(x){ifelse(x$Direction=="Up", -10*log10(x$PValue), 10*log10(x$PValue))})
+rownames(PValue) <- rownames(res[[1]])
+PValue_max <- rowMax(abs(PValue))
+PValue_small <- PValue[PValue_max>30, ]
+anno <- data.frame(Time=paste0("Day",1:10))
+rownames(anno) <- colnames(PValue_small)  <- paste0("Day",1:10)
+pheatmap(PValue_small, cluster_cols=FALSE)
+```
+
+
+
